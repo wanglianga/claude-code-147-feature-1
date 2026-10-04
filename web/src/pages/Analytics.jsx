@@ -73,6 +73,8 @@ export default function Analytics() {
                   <Statistic title="早餐食材" value={seg.costs.breakfast} prefix="¥" />
                   <Statistic title="维修" value={seg.costs.maintenance} prefix="¥" />
                   <Statistic title="赔付补偿" value={seg.costs.compensation} prefix="¥" valueStyle={{ color: '#cf1322' }} />
+                  <Statistic title="合作民宿房费(超卖转住)" value={seg.costs.partnerRelocation} prefix="¥" valueStyle={{ color: '#cf1322' }} />
+                  <Statistic title="渠道超卖索赔到账" value={seg.costs.channelClaimRecovered} prefix="-¥" valueStyle={{ color: '#2f6b4f' }} />
                 </Card>
               </Col>
             </Row>

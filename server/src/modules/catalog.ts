@@ -55,7 +55,8 @@ export class CatalogController {
     const prices = await this.prices.find({ where: { date: Between(start, end) } });
     const priceMap = new Map(prices.map((p) => [`${p.roomTypeId}|${p.date}`, Number(p.price)]));
     const dates = eachDay(start, addDays(end, 1));
-    const active = bookings.filter((b) => b.status !== 'cancelled');
+    // 转住合作民宿/超卖退款单已释放本店房间，不再占用房态
+    const active = bookings.filter((b) => !['cancelled', 'relocated', 'refunded'].includes(b.status));
     return {
       from: start,
       to: end,

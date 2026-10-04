@@ -29,6 +29,8 @@ export default function Settlements() {
           <Statistic title="应收合计" value={totals.gross} prefix="¥" />
           <Statistic title="渠道佣金" value={totals.commission} prefix="-¥" valueStyle={{ color: '#cf1322' }} />
           <Statistic title="补偿支出" value={totals.compensation} prefix="-¥" valueStyle={{ color: '#cf1322' }} />
+          <Statistic title="合作民宿房费" value={totals.partnerCost || 0} prefix="-¥" valueStyle={{ color: '#cf1322' }} />
+          <Statistic title="超卖索赔到账" value={totals.claimSettled || 0} prefix="+¥" valueStyle={{ color: '#2f6b4f' }} />
           <Statistic title="押金扣款留存" value={totals.depositDeducted} prefix="+¥" />
           <Statistic title="净收入" value={totals.net} prefix="¥" valueStyle={{ color: '#2f6b4f', fontWeight: 700 }} />
         </div>
@@ -40,6 +42,9 @@ export default function Settlements() {
             { title: '客人', dataIndex: 'guestName', width: 100 },
             { title: '渠道', dataIndex: 'channel', width: 90 },
             { title: '房间', width: 110, render: (_, r) => `${r.roomCode} ${r.roomType}` },
+            { title: '超卖处置', width: 110, render: (_, r) => r.relocatedToPartner
+              ? <Tag color="purple">转住{r.relocatedToPartner}</Tag>
+              : r.oversell ? <Tag color="blue">{r.oversell.resolutionType === 'upgrade' ? '店内升级' : '超卖处置'}</Tag> : '-' },
             { title: '状态', dataIndex: 'status', width: 90, render: (v) => <Tag color={BOOKING_STATUS[v]?.color}>{BOOKING_STATUS[v]?.text}</Tag> },
             { title: '房费', width: 90, align: 'right', render: (_, r) => `¥${r.lines[0].amount}` },
             { title: '加床', width: 80, align: 'right', render: (_, r) => `¥${r.lines[1].amount}` },

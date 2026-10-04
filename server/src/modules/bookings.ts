@@ -6,7 +6,7 @@ import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import {
   Booking, Channel, CleaningTask, Compensation, DailyInventory, DailyPrice,
-  Incident, Review, Room,
+  Incident, OversellCase, Review, Room,
 } from '../entities';
 import { computeSettlement } from '../common/settlement';
 import { CurrentUser } from '../common/auth';
@@ -28,6 +28,8 @@ class CreateBookingDto {
   invoiceRequired?: boolean;
   invoiceTitle?: string;
   specialRequests?: string;
+  memberLevel?: string; // regular | silver | gold | platinum
+  etaTime?: string;     // 预计到店时间
   force?: boolean; // OTA 强推/店主强制下单，允许突破可售（可能触发超卖事件）
 }
 
@@ -43,6 +45,7 @@ export class BookingsController {
     @InjectRepository(Incident) private incidents: Repository<Incident>,
     @InjectRepository(Review) private reviews: Repository<Review>,
     @InjectRepository(Compensation) private compensations: Repository<Compensation>,
+    @InjectRepository(OversellCase) private oversellCases: Repository<OversellCase>,
     private dataSource: DataSource,
   ) {}
 
@@ -120,6 +123,8 @@ export class BookingsController {
         breakfastCount, dietaryNotes: dto.dietaryNotes || '',
         invoiceRequired: !!dto.invoiceRequired, invoiceTitle: dto.invoiceTitle || '',
         specialRequests: dto.specialRequests || '',
+        memberLevel: ['silver', 'gold', 'platinum'].includes(dto.memberLevel || '') ? dto.memberLevel! : 'regular',
+        etaTime: dto.etaTime ? new Date(dto.etaTime) : null,
         roomFee: round2(roomFee), extraBedFee, breakfastFee, petFee, totalAmount,
         depositAmount: Number(type.depositAmount), depositDeducted: 0, depositReturned: 0,
         status: 'booked',
@@ -144,16 +149,23 @@ export class BookingsController {
 
   private async buildDetail(id: number) {
     const booking = await this.bookings.findOne({
-      where: { id }, relations: ['channel', 'room', 'roomType'],
+      where: { id }, relations: ['channel', 'room', 'roomType', 'relocatedToPartner'],
     });
     if (!booking) throw new NotFoundException('订单不存在');
-    const [incidents, review, compensations, cleaningTask] = await Promise.all([
+    const [incidents, review, compensations, cleaningTask, oversellCase] = await Promise.all([
       this.incidents.find({ where: { bookingId: id }, order: { occurredAt: 'ASC' } }),
       this.reviews.findOne({ where: { bookingId: id } }),
       this.compensations.find({ where: { bookingId: id } }),
       this.cleaning.findOne({ where: { bookingId: id }, relations: ['assignee'] }),
+      this.oversellCases.findOne({
+        where: { bookingId: id }, order: { id: 'DESC' },
+        relations: ['partner', 'upgradedRoom', 'channel', 'incident'],
+      }),
     ]);
-    return { ...booking, incidents, review, compensations, cleaningTask, settlement: computeSettlement(booking, compensations) };
+    return {
+      ...booking, incidents, review, compensations, cleaningTask, oversellCase,
+      settlement: computeSettlement(booking, compensations, oversellCase),
+    };
   }
 
   @Post(':id/check-in')
@@ -249,7 +261,7 @@ export class BookingsController {
 
 @Module({
   imports: [TypeOrmModule.forFeature([
-    Booking, Room, Channel, DailyInventory, DailyPrice, CleaningTask, Incident, Review, Compensation,
+    Booking, Room, Channel, DailyInventory, DailyPrice, CleaningTask, Incident, Review, Compensation, OversellCase,
   ])],
   controllers: [BookingsController],
 })

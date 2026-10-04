@@ -5,7 +5,7 @@ import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 import { Between, Repository } from 'typeorm';
 import {
   Booking, BreakfastPrep, Compensation, DailyInventory, Incident,
-  LinenDelivery, LinenItem, MaintenanceTicket, Review, Room, RoomType, CleaningTask,
+  LinenDelivery, LinenItem, MaintenanceTicket, OversellCase, Review, Room, RoomType, CleaningTask,
 } from '../entities';
 import { Roles } from '../common/auth';
 import { addDays, diffDays, eachDay, overlapNights, round2, todayStr } from '../common/util';
@@ -30,11 +30,14 @@ export class AnalyticsController {
     @InjectRepository(BreakfastPrep) private preps: Repository<BreakfastPrep>,
     @InjectRepository(DailyInventory) private inventory: Repository<DailyInventory>,
     @InjectRepository(MaintenanceTicket) private maintenance: Repository<MaintenanceTicket>,
+    @InjectRepository(OversellCase) private oversellCases: Repository<OversellCase>,
   ) {}
 
   private async bookingsInRange(from: string, to: string) {
     const all = await this.bookings.find({ relations: ['channel', 'roomType', 'room'] });
-    return all.filter((b) => b.status !== 'cancelled' && b.checkIn <= to && b.checkOut >= from);
+    // 超卖退款单已全额退款不计收入；转住单保留原单收入（渠道仍按原单结算，合作方支出计成本）
+    return all.filter((b) => !['cancelled', 'refunded'].includes(b.status)
+      && b.checkIn <= to && b.checkOut >= from);
   }
 
   // 经营看板
@@ -136,6 +139,13 @@ export class AnalyticsController {
     const breakfastPortions = preps.reduce((s, p) => s + p.preparedPortions, 0);
     const maintenanceCost = (await this.maintenance.find())
       .reduce((s, m) => s + Number(m.cost), 0);
+    const osCases = await this.oversellCases.find();
+    const partnerCost = osCases
+      .filter((c) => c.resolutionType === 'partner')
+      .reduce((s, c) => s + Number(c.partnerCost), 0);
+    const channelClaimSettled = osCases
+      .filter((c) => c.channelClaimStatus === 'settled')
+      .reduce((s, c) => s + Number(c.channelClaimAmount), 0);
     const totalComp = comps.filter((c) => c.status !== 'cancelled').reduce((s, c) => s + Number(c.amount), 0);
     const totalCommission = bookings.reduce((s, b) => s + Number(b.roomFee) * Number((b.channel as any)?.commissionRate || 0), 0);
     const costs = {
@@ -144,10 +154,14 @@ export class AnalyticsController {
       breakfast: round2(breakfastPortions * BREAKFAST_COST_PER_PORTION),
       maintenance: round2(maintenanceCost),
       compensation: round2(totalComp),
+      partnerRelocation: round2(partnerCost),
       commission: round2(totalCommission),
+      channelClaimRecovered: round2(channelClaimSettled),
     };
     const grossTotal = round2(seg.roomFee + seg.extraBed + seg.breakfast + seg.petFee);
-    const costTotal = round2(Object.values(costs).reduce((s, v) => s + v, 0));
+    const costBearing = round2(costs.cleaning + costs.linen + costs.breakfast + costs.maintenance
+      + costs.compensation + costs.partnerRelocation + costs.commission);
+    const costTotal = round2(costBearing - channelClaimSettled);
 
     // 问题归类：价格策略 / 履约能力 / 个别客诉
     const incidents = await this.incidents.find();
@@ -259,7 +273,7 @@ export class AnalyticsController {
 @Module({
   imports: [TypeOrmModule.forFeature([
     Booking, Room, RoomType, Incident, Review, Compensation, CleaningTask,
-    LinenItem, LinenDelivery, BreakfastPrep, DailyInventory, MaintenanceTicket,
+    LinenItem, LinenDelivery, BreakfastPrep, DailyInventory, MaintenanceTicket, OversellCase,
   ])],
   controllers: [AnalyticsController],
 })

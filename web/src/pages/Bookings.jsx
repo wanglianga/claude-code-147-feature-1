@@ -4,7 +4,7 @@ import {
   Modal, Popconfirm, Select, Space, Table, Tabs, Tag, Timeline, message,
 } from 'antd';
 import dayjs from 'dayjs';
-import api, { BOOKING_STATUS, INCIDENT_TYPES, INCIDENT_STATUS, TASK_STATUS, DIRTINESS, REVIEW_CATEGORIES } from '../api';
+import api, { BOOKING_STATUS, INCIDENT_TYPES, INCIDENT_STATUS, TASK_STATUS, DIRTINESS, MEMBER_LEVELS, OVERSELL_RESOLUTION, CLAIM_STATUS, RESPONSIBILITY, PARTNER_SETTLEMENT, REVIEW_CATEGORIES } from '../api';
 
 export default function Bookings() {
   const [list, setList] = useState([]);
@@ -37,6 +37,7 @@ export default function Bookings() {
       ...values,
       checkIn: values.range[0].format('YYYY-MM-DD'),
       checkOut: values.range[1].format('YYYY-MM-DD'),
+      etaTime: values.etaTime ? values.etaTime.format('YYYY-MM-DDTHH:mm:ss') : undefined,
       range: undefined,
     });
     message.success('订单创建成功');
@@ -56,6 +57,7 @@ export default function Bookings() {
     { title: '离店', dataIndex: 'checkOut', width: 105 },
     { title: '人数', width: 90, render: (_, r) => `${r.adults}大${r.children}小${r.extraBeds ? ` +${r.extraBeds}床` : ''}${r.pets ? ` 🐾${r.pets}` : ''}` },
     { title: '早餐', dataIndex: 'breakfastCount', width: 60, render: (v) => `${v}份` },
+    { title: '会员', dataIndex: 'memberLevel', width: 76, render: (v) => v && v !== 'regular' ? <Tag color={MEMBER_LEVELS[v]?.color}>{MEMBER_LEVELS[v]?.text}</Tag> : '-' },
     { title: '总额', dataIndex: 'totalAmount', width: 90, render: (v) => `¥${v}` },
     { title: '状态', dataIndex: 'status', width: 90, render: (v) => <Tag color={BOOKING_STATUS[v]?.color}>{BOOKING_STATUS[v]?.text}</Tag> },
     { title: '操作', width: 230, render: (_, r) => (
@@ -94,7 +96,7 @@ export default function Bookings() {
       <Modal title="新建订单（统一房态/价格/规则校验）" open={createOpen} onCancel={() => setCreateOpen(false)}
         onOk={() => form.submit()} width={640} okText="创建">
         <Form form={form} layout="vertical" onFinish={create}
-          initialValues={{ adults: 2, children: 0, extraBeds: 0, pets: 0, breakfastCount: 2, range: [dayjs('2026-10-05'), dayjs('2026-10-06')] }}>
+          initialValues={{ adults: 2, children: 0, extraBeds: 0, pets: 0, breakfastCount: 2, memberLevel: 'regular', range: [dayjs('2026-10-05'), dayjs('2026-10-06')] }}>
           <Space size={12} wrap>
             <Form.Item name="channelId" label="渠道" rules={[{ required: true }]} style={{ width: 150 }}>
               <Select options={channels.map((c) => ({ value: c.id, label: `${c.name}(佣金${(c.commissionRate * 100).toFixed(0)}%)` }))} />
@@ -119,6 +121,15 @@ export default function Bookings() {
           <Space size={12} wrap>
             <Form.Item name="dietaryNotes" label="忌口" style={{ width: 220 }}><Input placeholder="如：不吃辣/素食/海鲜过敏" /></Form.Item>
             <Form.Item name="invoiceTitle" label="发票抬头（留空=不需要发票）" style={{ width: 260 }}><Input /></Form.Item>
+          </Space>
+          <Space size={12} wrap>
+            <Form.Item name="memberLevel" label="会员等级">
+              <Select style={{ width: 130 }}
+                options={Object.entries(MEMBER_LEVELS).map(([v, m]) => ({ value: v, label: m.text }))} />
+            </Form.Item>
+            <Form.Item name="etaTime" label="预计到店时间">
+              <DatePicker showTime={{ format: 'HH:mm' }} format="YYYY-MM-DD HH:mm" style={{ width: 200 }} />
+            </Form.Item>
             <Form.Item name="force" valuePropName="checked" label=" "><Checkbox>OTA强推/强制下单（允许突破可售）</Checkbox></Form.Item>
           </Space>
         </Form>
@@ -193,6 +204,10 @@ function BookingDetail({ detail, refresh }) {
         ) : '暂无事件',
       },
       {
+        key: 'oversell', label: `超卖处置${detail.oversellCase ? '●' : ''}`,
+        children: detail.oversellCase ? <OversellTab data={detail.oversellCase} /> : '该订单暂无超卖处置工单',
+      },
+      {
         key: 'cleaning', label: '保洁',
         children: detail.cleaningTask ? (
           <Descriptions column={1} size="small" bordered items={[
@@ -232,6 +247,14 @@ function BookingDetail({ detail, refresh }) {
         key: 'settlement', label: '结算明细',
         children: (
           <>
+            {s.oversell && s.oversell.settlementLocked && (
+              <div style={{ marginBottom: 8 }}>
+                <Tag color="purple">超卖{OVERSELL_RESOLUTION[s.oversell.resolutionType]?.text}</Tag>
+                <span style={{ color: '#722ed1' }}>
+                  结算口径已锁定{s.oversell.partnerName ? `：转住「${s.oversell.partnerName}」按合作价 ¥${s.oversell.partnerPricePerNight}/晚结算，渠道不再按原房型结算` : ''}
+                </span>
+              </div>
+            )}
             <Table size="small" rowKey="label" dataSource={s.lines} pagination={false} columns={[
               { title: '项目', dataIndex: 'label' },
               { title: '金额', dataIndex: 'amount', align: 'right', render: (v) => <span style={{ color: v < 0 ? '#cf1322' : 'inherit' }}>¥{v.toFixed(2)}</span> },
@@ -248,5 +271,35 @@ function BookingDetail({ detail, refresh }) {
         ),
       },
     ]} />
+  );
+}
+
+// 超卖处置摘要（完整操作在「超卖换房补偿」页面）
+function OversellTab({ data }) {
+  const oc = data;
+  return (
+    <div>
+      <Descriptions column={2} size="small" bordered items={[
+        { key: '1', label: '工单号', children: oc.code },
+        { key: '2', label: '状态', children: oc.status },
+        { key: '3', label: '会员', children: MEMBER_LEVELS[oc.memberLevel]?.text },
+        { key: '4', label: '优先级得分', children: oc.priorityScore },
+        { key: '5', label: '下单时间', children: dayjs(oc.orderedAt).format('YYYY-MM-DD HH:mm') },
+        { key: '6', label: '到店时间', children: dayjs(oc.etaTime).format('YYYY-MM-DD HH:mm') },
+        { key: '7', label: '房型价值', children: `¥${oc.roomTypeValue}` },
+        { key: '8', label: '处置方式', children: oc.resolutionType
+          ? <Tag color={OVERSELL_RESOLUTION[oc.resolutionType]?.color}>{OVERSELL_RESOLUTION[oc.resolutionType]?.text}</Tag> : '-' },
+        { key: '9', label: '补偿成本', children: `¥${oc.compensationCost}` },
+        { key: '10', label: '合作方支出', children: oc.partnerCost > 0 ? `¥${oc.partnerCost}` : '-' },
+        { key: '11', label: '渠道责任', children: <Tag color={RESPONSIBILITY[oc.channelResponsibility]?.color}>{RESPONSIBILITY[oc.channelResponsibility]?.text}</Tag> },
+        { key: '12', label: '渠道索赔', children: oc.channelClaimAmount > 0
+          ? `¥${oc.channelClaimAmount}（${CLAIM_STATUS[oc.channelClaimStatus]?.text}）` : '-' },
+        { key: '13', label: '客人满意度', children: oc.guestSatisfaction > 0 ? `${oc.guestSatisfaction} 分` : '-' },
+        { key: '14', label: '结算锁定', children: oc.settlementLocked ? <Tag color="green">已锁定</Tag> : '-' },
+        { key: '15', label: '合作方信息', children: oc.partner ?
+          `${oc.partner.name}｜合作价 ¥${oc.partnerPricePerNight}/晚｜${oc.distanceKm}km｜${PARTNER_SETTLEMENT[oc.partnerSettlementType]}` : '-' },
+        { key: '16', label: '处理结论', children: oc.resolution || '-' },
+      ]} />
+    </div>
   );
 }

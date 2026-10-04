@@ -36,7 +36,39 @@ export const BOOKING_STATUS = {
   checked_in: { text: '在住', color: 'green' },
   checked_out: { text: '已退房', color: 'default' },
   cancelled: { text: '已取消', color: 'red' },
+  relocated: { text: '转住合作民宿', color: 'purple' },
+  refunded: { text: '超卖退款', color: 'volcano' },
 };
+export const MEMBER_LEVELS = {
+  regular: { text: '普通会员', color: 'default' },
+  silver: { text: '白银会员', color: 'blue' },
+  gold: { text: '黄金会员', color: 'gold' },
+  platinum: { text: '铂金会员', color: 'purple' },
+};
+export const OVERSELL_CASE_STATUS = {
+  open: { text: '待处置', color: 'red' },
+  arranged: { text: '方案已安排', color: 'orange' },
+  accepted: { text: '客人已接受', color: 'green' },
+  rejected: { text: '客人拒绝', color: 'volcano' },
+  closed: { text: '已关闭', color: 'default' },
+};
+export const OVERSELL_RESOLUTION = {
+  upgrade: { text: '店内升级房', color: 'blue' },
+  partner: { text: '合作民宿转住', color: 'purple' },
+  refund: { text: '退款补偿', color: 'volcano' },
+};
+export const CLAIM_STATUS = {
+  pending: { text: '待索赔', color: 'orange' },
+  claimed: { text: '索赔中', color: 'blue' },
+  settled: { text: '已到账', color: 'green' },
+  waived: { text: '已放弃', color: 'default' },
+};
+export const RESPONSIBILITY = {
+  channel: { text: '渠道全责', color: 'red' },
+  shared: { text: '双方共担', color: 'orange' },
+  platform: { text: '平台承担', color: 'blue' },
+};
+export const PARTNER_SETTLEMENT = { monthly: '月结', guest_paid: '客人自付', upfront: '预付' };
 export const ROOM_STATUS = {
   clean: { text: '已清洁', color: 'green' },
   dirty: { text: '待打扫', color: 'orange' },

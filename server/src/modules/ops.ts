@@ -268,7 +268,9 @@ export class BreakfastController {
   async plan(@Query('date') date?: string) {
     const d = date || addDays(todayStr(), 1);
     const all = await this.bookings.find({ relations: ['room', 'roomType'] });
-    const serving = all.filter((b) => b.status !== 'cancelled' && b.checkIn < d && b.checkOut >= d && b.breakfastCount > 0);
+    // 转住合作民宿/退款的客人不在本店用早餐
+    const serving = all.filter((b) => !['cancelled', 'relocated', 'refunded'].includes(b.status)
+      && b.checkIn < d && b.checkOut >= d && b.breakfastCount > 0);
     const required = serving.reduce((s, b) => s + b.breakfastCount, 0);
     const prep = await this.preps.findOne({ where: { date: d } });
     return {
