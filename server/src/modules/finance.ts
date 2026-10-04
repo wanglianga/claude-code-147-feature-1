@@ -1,7 +1,7 @@
 import { Controller, Get, Module, Query } from '@nestjs/common';
 import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Booking, Compensation } from '../entities';
+import { Booking, Compensation, OversellItem } from '../entities';
 import { computeSettlement } from '../common/settlement';
 import { round2 } from '../common/util';
 
@@ -11,6 +11,7 @@ export class SettlementController {
   constructor(
     @InjectRepository(Booking) private bookings: Repository<Booking>,
     @InjectRepository(Compensation) private compensations: Repository<Compensation>,
+    @InjectRepository(OversellItem) private oversellItems: Repository<OversellItem>,
   ) {}
 
   @Get()
@@ -25,8 +26,13 @@ export class SettlementController {
     if (to) qb.andWhere('b.checkIn <= :to', { to });
     const rows = await qb.getMany();
     const comps = await this.compensations.find();
+    const oItems = await this.oversellItems.find({ relations: ['partner', 'upgradeRoom'] });
     const list = rows.map((b) =>
-      computeSettlement(b, comps.filter((c) => c.bookingId === b.id && c.status !== 'cancelled')));
+      computeSettlement(
+        b,
+        comps.filter((c) => c.bookingId === b.id && c.status !== 'cancelled'),
+        oItems.filter((i) => i.bookingId === b.id),
+      ));
     const totals = list.reduce((acc, s) => ({
       gross: round2(acc.gross + s.gross),
       commission: round2(acc.commission + s.commission),
@@ -39,7 +45,7 @@ export class SettlementController {
 }
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Booking, Compensation])],
+  imports: [TypeOrmModule.forFeature([Booking, Compensation, OversellItem])],
   controllers: [SettlementController],
 })
 export class FinanceModule {}

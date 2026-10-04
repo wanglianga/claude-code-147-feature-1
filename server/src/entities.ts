@@ -105,6 +105,13 @@ export class Booking {
   @Column({ default: '' }) invoiceTitle: string;
   @Column({ default: '' }) specialRequests: string;
 
+  // 会员：none 普卡 | silver 银卡 | gold 金卡 | platinum 白金；超卖决策时影响优先保留权重
+  @Column({ default: 'none' }) memberLevel: string;
+  @Column({ default: 0 }) memberPoints: number;
+  @Column({ type: 'timestamptz', nullable: true }) estimatedArrival: Date; // 客人自报/渠道回传的预计到店时间
+  // 结算口径：normal 本店按原渠道 | partner_settled 转住合作民宿，按合作方价格结算（渠道不得再按原房型结算）
+  @Column({ default: 'normal' }) settlementBasis: string;
+
   @Money() roomFee: number;
   @Money() extraBedFee: number;
   @Money() breakfastFee: number;
@@ -116,6 +123,13 @@ export class Booking {
 
   // booked | checked_in | checked_out | cancelled
   @Column({ default: 'booked' }) status: string;
+
+  // —— 超卖换房补偿：原订单保留原因、补偿成本与渠道责任，供复盘追责与结算改口径 ——
+  @Column({ default: '' }) oversellReason: string;     // 如：OTA房态延迟同步
+  @Money() oversellCompensationCost: number;           // 该单实际承担的补偿成本
+  @Column({ default: '' }) channelResponsibility: string; // ota_delayed_sync 等渠道责任代码
+  @Column({ nullable: true }) oversellCaseId: number;  // 归属的超卖案件
+
   @Column({ type: 'timestamptz', nullable: true }) actualCheckIn: Date;
   @Column({ type: 'timestamptz', nullable: true }) actualCheckOut: Date;
   @CreateDateColumn() createdAt: Date;
@@ -235,8 +249,123 @@ export class Compensation {
   @CreateDateColumn() createdAt: Date;
 }
 
+// ---------- 同村合作民宿（超卖转住接收方） ----------
+@Entity('partner_inns')
+export class PartnerInn {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ unique: true }) code: string;
+  @Column() name: string;
+  @Column() village: string;       // 同村/邻村
+  @Column({ type: 'numeric', precision: 5, scale: 1, default: 0, transformer: numTransformer })
+  distanceKm: number;            // 与本店距离（公里）
+  @Column() contactName: string;
+  @Column({ default: '' }) contactPhone: string;
+  // monthly 月结 | per_night 逐晚现结 | prepaid 平台预付
+  @Column({ default: 'monthly' }) settlementMethod: string;
+  @Column({ default: true }) active: boolean;
+  @Column({ type: 'text', default: '' }) note: string;
+}
+
+// 合作民宿当日可接收房型与报价（按日期/房型记录合作方价格）
+@Entity('partner_rooms')
+@Unique(['partnerId', 'date', 'roomName'])
+export class PartnerRoom {
+  @PrimaryGeneratedColumn() id: number;
+  @Column() partnerId: number;
+  @ManyToOne(() => PartnerInn) @JoinColumn({ name: 'partnerId' }) partner: PartnerInn;
+  @Column({ type: 'date' }) date: string;
+  @Column() roomName: string;      // 合作方房型名称（如：观景大床/山景双床）
+  @Column({ default: 1 }) available: number;
+  @Money() partnerPrice: number;   // 合作方结算价（平台付给合作方）
+  @Column({ default: 0 }) sold: number; // 已被本店转住占用
+}
+
+// ---------- 超卖换房案件 ----------
+// 一起超卖可能涉及同一房型同一晚的多张订单；案件下挂多个客人的处理项
+@Entity('oversell_cases')
+export class OversellCase {
+  @PrimaryGeneratedColumn() id: number;
+  @Column({ unique: true }) code: string;          // OS26xxxx
+  @Column() roomTypeId: number;
+  @ManyToOne(() => RoomType) @JoinColumn({ name: 'roomTypeId' }) roomType: RoomType;
+  @Column({ type: 'date' }) date: string;          // 冲突入住日
+  @Column() channelId: number;                      // 责任渠道（超卖来源）
+  @ManyToOne(() => Channel) @JoinColumn({ name: 'channelId' }) channel: Channel;
+  @Column({ default: 'ota_delayed_sync' }) channelResponsibility: string; // 渠道责任代码
+  @Column({ type: 'text' }) reason: string;        // 超卖原因（如 OTA 房态延迟同步 28 分钟）
+  @Column({ default: 'open' }) status: string;     // open 待处理 | arranged 方案已生成 | accepted 客人已接受 | resolved 全部处理完
+  @Column({ type: 'timestamptz' }) detectedAt: Date;
+  @Column({ type: 'timestamptz', nullable: true }) resolvedAt: Date;
+  @Column({ nullable: true }) incidentId: number;   // 关联的超卖链路事件
+  @Money() totalCompensationCost: number;          // 案件补偿成本合计（本店承担）
+  @Column({ default: '' }) syncNote: string;       // 复盘后对同步策略的调整结论
+}
+
+// 案件下每位冲突客人的处理项
+@Entity('oversell_items')
+export class OversellItem {
+  @PrimaryGeneratedColumn() id: number;
+  @Column() caseId: number;
+  @ManyToOne(() => OversellCase) @JoinColumn({ name: 'caseId' }) oversellCase: OversellCase;
+  @Column() bookingId: number;
+  @ManyToOne(() => Booking) @JoinColumn({ name: 'bookingId' }) booking: Booking;
+
+  // 平台综合评分（下单时间/到店时间/房型价值/会员等级），分高者优先保留原房
+  @Column({ type: 'numeric', precision: 7, scale: 2, default: 0, transformer: numTransformer })
+  priorityScore: number;
+  @Column({ type: 'integer', default: 0 }) rank: number; // 同案件内排名（1 为优先保留）
+  @Column({ type: 'text', default: '' }) scoreDetail: string; // 各因子得分明细
+
+  // upgrade 升级房 | partner 同村合作民宿转住 | refund 退款补偿（自行解决）
+  @Column({ default: '' }) option: string;
+  @Column({ default: 'proposed' }) status: string; // proposed 已提议 | accepted 客人接受 | declined 客人拒绝
+  @Column({ type: 'timestamptz', nullable: true }) decidedAt: Date;
+  @Column({ type: 'text', default: '' }) guestResponse: string;
+
+  // 升级房方案
+  @Column({ nullable: true }) upgradeRoomId: number;
+  @ManyToOne(() => Room, { nullable: true }) @JoinColumn({ name: 'upgradeRoomId' }) upgradeRoom: Room;
+  @Column({ nullable: true }) upgradeRoomTypeId: number;
+  @Money() upgradePrice: number;       // 升级房型当日价格
+  @Money() upgradeSurcharge: number;   // 向客人加收（通常 0，平台吸收差价）
+
+  // 合作民宿转住方案
+  @Column({ nullable: true }) partnerId: number;
+  @ManyToOne(() => PartnerInn, { nullable: true }) @JoinColumn({ name: 'partnerId' }) partner: PartnerInn;
+  @Column({ nullable: true }) partnerRoomId: number;
+  @Column({ type: 'date', nullable: true }) partnerDate: string;
+  @Money() partnerPrice: number;       // 合作方结算价（快照）
+  @Column({ type: 'numeric', precision: 5, scale: 1, nullable: true, transformer: numTransformer })
+  partnerDistanceKm: number;
+  @Column({ default: '' }) partnerSettlementMethod: string; // 结算方式快照
+  @Column({ type: 'numeric', precision: 4, scale: 2, nullable: true, transformer: numTransformer })
+  guestSatisfaction: number;           // 客人满意度 1-5（回访）
+  @Column({ default: '' }) settlementGuard: string; // 防错结算提示（渠道不得再按原房型结算）
+
+  // 退款补偿方案 / 各方案通用补偿
+  @Money() compensationAmount: number; // 现金/退款补偿
+  @Column({ default: '' }) compensationType: string; // cash | refund | voucher
+  @Column({ type: 'numeric', precision: 12, scale: 2, default: 0, transformer: numTransformer })
+  platformCost: number;                // 平台为本客人实际承担成本（差价/补贴/退款合计）
+}
+
+// ---------- 渠道房态同步策略（店主复盘时调整，防止再次超卖） ----------
+@Entity('channel_sync_policies')
+export class ChannelSyncPolicy {
+  @PrimaryGeneratedColumn() id: number;
+  @Column() channelId: number;
+  @ManyToOne(() => Channel) @JoinColumn({ name: 'channelId' }) channel: Channel;
+  @Column({ default: 5 }) syncIntervalMin: number;   // 房态推送间隔（分钟）
+  @Column({ default: 0 }) safetyBuffer: number;      // 安全缓冲房量（预留不投放）
+  // auto 自动实时同步 | manual 人工确认后放房 | pause 旺季暂停该渠道超售房投放
+  @Column({ default: 'auto' }) mode: string;
+  @Column({ type: 'timestamptz', default: () => 'now()' }) updatedAt: Date;
+  @Column({ type: 'text', default: '' }) note: string;
+}
+
 export const ALL_ENTITIES = [
   User, RoomType, Room, Channel, DailyPrice, DailyInventory, Booking,
   CleaningTask, LinenItem, LinenDelivery, MaintenanceTicket, BreakfastPrep,
   Incident, Review, Compensation,
+  PartnerInn, PartnerRoom, OversellCase, OversellItem, ChannelSyncPolicy,
 ];

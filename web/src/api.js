@@ -30,6 +30,28 @@ export const INCIDENT_TYPES = {
   extra_guests: '临时加人', pet_damage: '宠物损坏', breakfast_shortage: '早餐不足',
   oversell: '渠道超卖', bad_review: '差评', other: '其他',
 };
+export const MEMBER_LEVELS = { none: { text: '普卡', color: 'default' }, silver: { text: '银卡', color: 'blue' }, gold: { text: '金卡', color: 'gold' }, platinum: { text: '白金', color: 'purple' } };
+export const OVERSELL_CASE_STATUS = {
+  open: { text: '待处理', color: 'red' },
+  arranged: { text: '方案已生成', color: 'orange' },
+  accepted: { text: '客人已接受', color: 'blue' },
+  resolved: { text: '已解决', color: 'green' },
+};
+export const OVERSELL_ITEM_STATUS = {
+  pending: { text: '待出方案', color: 'red' },
+  proposed: { text: '已提议', color: 'orange' },
+  accepted: { text: '客人接受', color: 'green' },
+  declined: { text: '客人拒绝', color: 'volcano' },
+  kept: { text: '保留原房', color: 'blue' },
+};
+export const OVERSELL_OPTIONS = {
+  keep: { text: '保留原房', color: 'blue' },
+  upgrade: { text: '升级房', color: 'green' },
+  partner: { text: '合作民宿转住', color: 'geekblue' },
+  refund: { text: '退款补偿', color: 'orange' },
+};
+export const SETTLE_METHODS = { monthly: '月结', per_night: '逐晚现结', prepaid: '平台预付' };
+export const SYNC_MODES = { auto: { text: '自动实时同步', color: 'green' }, manual: { text: '人工确认放房', color: 'orange' }, pause: { text: '暂停投放', color: 'red' } };
 export const REVIEW_CATEGORIES = { hardware: '硬件', service: '服务', oversell: '超卖', food: '餐食' };
 export const BOOKING_STATUS = {
   booked: { text: '待入住', color: 'blue' },

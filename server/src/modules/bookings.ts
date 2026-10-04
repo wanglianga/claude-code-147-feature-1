@@ -6,7 +6,7 @@ import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import {
   Booking, Channel, CleaningTask, Compensation, DailyInventory, DailyPrice,
-  Incident, Review, Room,
+  Incident, Review, Room, OversellItem,
 } from '../entities';
 import { computeSettlement } from '../common/settlement';
 import { CurrentUser } from '../common/auth';
@@ -28,6 +28,9 @@ class CreateBookingDto {
   invoiceRequired?: boolean;
   invoiceTitle?: string;
   specialRequests?: string;
+  memberLevel?: string; // none | silver | gold | platinum
+  memberPoints?: number;
+  estimatedArrival?: string; // 预计到店时间 ISO
   force?: boolean; // OTA 强推/店主强制下单，允许突破可售（可能触发超卖事件）
 }
 
@@ -43,6 +46,7 @@ export class BookingsController {
     @InjectRepository(Incident) private incidents: Repository<Incident>,
     @InjectRepository(Review) private reviews: Repository<Review>,
     @InjectRepository(Compensation) private compensations: Repository<Compensation>,
+    @InjectRepository(OversellItem) private oversellItems: Repository<OversellItem>,
     private dataSource: DataSource,
   ) {}
 
@@ -120,9 +124,11 @@ export class BookingsController {
         breakfastCount, dietaryNotes: dto.dietaryNotes || '',
         invoiceRequired: !!dto.invoiceRequired, invoiceTitle: dto.invoiceTitle || '',
         specialRequests: dto.specialRequests || '',
+        memberLevel: dto.memberLevel || 'none', memberPoints: dto.memberPoints || 0,
+        estimatedArrival: dto.estimatedArrival ? new Date(dto.estimatedArrival) : null,
         roomFee: round2(roomFee), extraBedFee, breakfastFee, petFee, totalAmount,
         depositAmount: Number(type.depositAmount), depositDeducted: 0, depositReturned: 0,
-        status: 'booked',
+        status: 'booked', oversellCompensationCost: 0,
       }));
       // 超卖事件：已订超过物理房量
       if (oversoldDates.length) {
@@ -147,13 +153,18 @@ export class BookingsController {
       where: { id }, relations: ['channel', 'room', 'roomType'],
     });
     if (!booking) throw new NotFoundException('订单不存在');
-    const [incidents, review, compensations, cleaningTask] = await Promise.all([
+    const [incidents, review, compensations, cleaningTask, oversellItems] = await Promise.all([
       this.incidents.find({ where: { bookingId: id }, order: { occurredAt: 'ASC' } }),
       this.reviews.findOne({ where: { bookingId: id } }),
       this.compensations.find({ where: { bookingId: id } }),
       this.cleaning.findOne({ where: { bookingId: id }, relations: ['assignee'] }),
+      this.oversellItems.find({ where: { bookingId: id }, relations: ['partner', 'upgradeRoom'] }),
     ]);
-    return { ...booking, incidents, review, compensations, cleaningTask, settlement: computeSettlement(booking, compensations) };
+    return {
+      ...booking, incidents, review, compensations, cleaningTask,
+      oversellItems,
+      settlement: computeSettlement(booking, compensations),
+    };
   }
 
   @Post(':id/check-in')
@@ -161,6 +172,7 @@ export class BookingsController {
     const b = await this.bookings.findOne({ where: { id } });
     if (!b) throw new NotFoundException('订单不存在');
     if (b.status !== 'booked') throw new BadRequestException('仅待入住订单可办理入住');
+    if (b.settlementBasis === 'partner_settled') throw new BadRequestException('该单已转住合作民宿，不在本店办理入住');
     b.status = 'checked_in';
     b.actualCheckIn = new Date();
     return this.bookings.save(b);
@@ -204,8 +216,11 @@ export class BookingsController {
     await this.dataSource.transaction(async (em) => {
       b.status = 'cancelled';
       await em.save(b);
-      for (const d of eachDay(b.checkIn, b.checkOut)) {
-        await em.decrement(DailyInventory, { roomTypeId: b.roomTypeId, date: d }, 'booked', 1);
+      // 转住合作民宿的订单在接受方案时已释放原房型库存，不再重复扣减
+      if (b.settlementBasis !== 'partner_settled') {
+        for (const d of eachDay(b.checkIn, b.checkOut)) {
+          await em.decrement(DailyInventory, { roomTypeId: b.roomTypeId, date: d }, 'booked', 1);
+        }
       }
     });
     return { ok: true };
@@ -249,7 +264,7 @@ export class BookingsController {
 
 @Module({
   imports: [TypeOrmModule.forFeature([
-    Booking, Room, Channel, DailyInventory, DailyPrice, CleaningTask, Incident, Review, Compensation,
+    Booking, Room, Channel, DailyInventory, DailyPrice, CleaningTask, Incident, Review, Compensation, OversellItem,
   ])],
   controllers: [BookingsController],
 })

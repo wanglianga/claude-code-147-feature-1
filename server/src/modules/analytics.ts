@@ -6,6 +6,7 @@ import { Between, Repository } from 'typeorm';
 import {
   Booking, BreakfastPrep, Compensation, DailyInventory, Incident,
   LinenDelivery, LinenItem, MaintenanceTicket, Review, Room, RoomType, CleaningTask,
+  OversellCase, OversellItem, ChannelSyncPolicy,
 } from '../entities';
 import { Roles } from '../common/auth';
 import { addDays, diffDays, eachDay, overlapNights, round2, todayStr } from '../common/util';
@@ -30,6 +31,9 @@ export class AnalyticsController {
     @InjectRepository(BreakfastPrep) private preps: Repository<BreakfastPrep>,
     @InjectRepository(DailyInventory) private inventory: Repository<DailyInventory>,
     @InjectRepository(MaintenanceTicket) private maintenance: Repository<MaintenanceTicket>,
+    @InjectRepository(OversellCase) private oversellCases: Repository<OversellCase>,
+    @InjectRepository(OversellItem) private oversellItems: Repository<OversellItem>,
+    @InjectRepository(ChannelSyncPolicy) private syncPolicies: Repository<ChannelSyncPolicy>,
   ) {}
 
   private async bookingsInRange(from: string, to: string) {
@@ -195,6 +199,78 @@ export class AnalyticsController {
     };
   }
 
+  // 超卖复盘：案件成本、渠道责任、换房方式效果（含合作方价格/距离/满意度/结算方式）与同步策略建议
+  @Get('oversell-review')
+  async oversellReview() {
+    const cases = await this.oversellCases.find({ relations: ['roomType', 'channel'], order: { detectedAt: 'DESC' } });
+    const items = await this.oversellItems.find({ relations: ['booking', 'partner'] });
+    const rows = cases.map((c) => {
+      const its = items.filter((i) => i.caseId === c.id && i.status === 'accepted');
+      const partnerItems = its.filter((i) => i.option === 'partner');
+      const upgradeItems = its.filter((i) => i.option === 'upgrade');
+      const refundItems = its.filter((i) => i.option === 'refund');
+      const sat = partnerItems.filter((i) => i.guestSatisfaction !== null).map((i) => Number(i.guestSatisfaction));
+      return {
+        code: c.code, date: c.date, roomType: (c as any).roomType?.name,
+        channel: (c as any).channel?.name, channelCode: (c as any).channel?.code,
+        responsibility: c.channelResponsibility, reason: c.reason,
+        status: c.status, totalCost: round2(Number(c.totalCompensationCost)),
+        options: {
+          upgrade: upgradeItems.length, partner: partnerItems.length, refund: refundItems.length,
+        },
+        partnerTransfers: partnerItems.map((i) => ({
+          guest: i.booking?.guestName, partner: (i as any).partner?.name,
+          pricePerNight: Number(i.partnerPrice), payout: round2(Number(i.partnerPrice) * (i.booking?.nights || 1)),
+          distanceKm: Number(i.partnerDistanceKm), method: i.partnerSettlementMethod,
+          satisfaction: i.guestSatisfaction !== null ? Number(i.guestSatisfaction) : null,
+        })),
+        avgSatisfaction: sat.length ? round2(sat.reduce((s, v) => s + v, 0) / sat.length) : null,
+        syncNote: c.syncNote,
+      };
+    });
+
+    // 按渠道汇总，并给出同步策略调整建议
+    const policies = await this.syncPolicies.find({ relations: ['channel'] });
+    const policyByChannelId = new Map(policies.map((p) => [p.channelId, p]));
+    const channelMap = new Map<string, any>();
+    for (const r of cases) {
+      const ch = (r as any).channel;
+      const k = String(ch?.id ?? (ch as any)?.code);
+      const cur = channelMap.get(k) || {
+        channelId: ch?.id, channelCode: (ch as any)?.code, channel: ch?.name,
+        cases: 0, cost: 0, partner: 0, upgrade: 0, refund: 0,
+      };
+      cur.cases += 1;
+      cur.cost = round2(cur.cost + Number(r.totalCompensationCost));
+      const ri = rows.find((x) => x.code === r.code)!;
+      cur.partner += ri.options.partner; cur.upgrade += ri.options.upgrade; cur.refund += ri.options.refund;
+      channelMap.set(k, cur);
+    }
+    const byChannel = [...channelMap.values()].map((s) => {
+      const policy = policyByChannelId.get(s.channelId) || null;
+      const suggestion = s.cases >= 1
+        ? {
+            syncIntervalMin: Math.min(policy?.syncIntervalMin ?? 5, 3),
+            safetyBuffer: (policy?.safetyBuffer ?? 0) + 1,
+            mode: s.cases >= 2 ? 'manual' : 'auto',
+            text: s.cases >= 2
+              ? '该渠道多次延迟同步：推送间隔收紧至 3 分钟、预留 1 间安全缓冲，超售房改人工确认放房'
+              : '推送间隔收紧至 3 分钟并预留 1 间安全缓冲房',
+          }
+        : { text: '同步正常，维持现策略' };
+      return { ...s, policy, suggestion };
+    });
+
+    const totals = {
+      cases: rows.length,
+      cost: round2(rows.reduce((s, r) => s + r.totalCost, 0)),
+      partner: rows.reduce((s, r) => s + r.options.partner, 0),
+      upgrade: rows.reduce((s, r) => s + r.options.upgrade, 0),
+      refund: rows.reduce((s, r) => s + r.options.refund, 0),
+    };
+    return { cases: rows, byChannel, totals };
+  }
+
   // 下一轮节假日可售房量建议：根据超卖、布草延迟、早餐投诉、补偿成本自动调整
   @Get('adjustment')
   async adjustment() {
@@ -260,6 +336,7 @@ export class AnalyticsController {
   imports: [TypeOrmModule.forFeature([
     Booking, Room, RoomType, Incident, Review, Compensation, CleaningTask,
     LinenItem, LinenDelivery, BreakfastPrep, DailyInventory, MaintenanceTicket,
+    OversellCase, OversellItem, ChannelSyncPolicy,
   ])],
   controllers: [AnalyticsController],
 })

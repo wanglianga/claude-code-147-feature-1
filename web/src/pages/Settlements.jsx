@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Card, DatePicker, Statistic, Table, Tag } from 'antd';
 import dayjs from 'dayjs';
-import api, { BOOKING_STATUS } from '../api';
+import api from '../api';
 
 export default function Settlements() {
   const [range, setRange] = useState([dayjs('2026-10-01'), dayjs('2026-10-08')]);
@@ -40,18 +40,28 @@ export default function Settlements() {
             { title: '客人', dataIndex: 'guestName', width: 100 },
             { title: '渠道', dataIndex: 'channel', width: 90 },
             { title: '房间', width: 110, render: (_, r) => `${r.roomCode} ${r.roomType}` },
-            { title: '状态', dataIndex: 'status', width: 90, render: (v) => <Tag color={BOOKING_STATUS[v]?.color}>{BOOKING_STATUS[v]?.text}</Tag> },
-            { title: '房费', width: 90, align: 'right', render: (_, r) => `¥${r.lines[0].amount}` },
-            { title: '加床', width: 80, align: 'right', render: (_, r) => `¥${r.lines[1].amount}` },
-            { title: '早餐', width: 80, align: 'right', render: (_, r) => `¥${r.lines[2].amount}` },
-            { title: '宠物费', width: 80, align: 'right', render: (_, r) => `¥${r.lines[3].amount}` },
-            { title: '佣金', dataIndex: 'commission', width: 90, align: 'right', render: (v) => <span style={{ color: '#cf1322' }}>-¥{v}</span> },
+            { title: '结算口径', width: 110, render: (_, r) => r.channelSettlementBlocked
+              ? <Tag color="geekblue">合作方价结算</Tag>
+              : <Tag color="default">原渠道</Tag> },
+            { title: '房费/代收', width: 100, align: 'right',
+              render: (_, r) => `¥${r.lines.find((l) => l.label.startsWith('房费'))?.amount ?? 0}` },
+            { title: '加床', width: 80, align: 'right', render: (_, r) => `¥${r.lines.find((l) => l.label === '加床费')?.amount ?? 0}` },
+            { title: '早餐', width: 80, align: 'right', render: (_, r) => `¥${r.lines.find((l) => l.label === '早餐费')?.amount ?? 0}` },
+            { title: '宠物费', width: 80, align: 'right', render: (_, r) => `¥${r.lines.find((l) => l.label === '宠物清洁费')?.amount ?? 0}` },
+            { title: '佣金', dataIndex: 'commission', width: 90, align: 'right', render: (v) => v > 0 ? <span style={{ color: '#cf1322' }}>-¥{v}</span> : <Tag color="green">免收</Tag> },
             { title: '补偿', dataIndex: 'compensation', width: 80, align: 'right', render: (v) => v > 0 ? <span style={{ color: '#cf1322' }}>-¥{v}</span> : '-' },
+            { title: '转住代付', width: 90, align: 'right', render: (_, r) => { const p = r.lines.find((l) => l.label.includes('代付')); return p ? <span style={{ color: '#cf1322' }}>-¥{Math.abs(p.amount)}</span> : '-'; } },
             { title: '押金扣留', width: 90, align: 'right', render: (_, r) => r.deposit.deducted > 0 ? `+¥${r.deposit.deducted}` : '-' },
             { title: '押金退还', width: 90, align: 'right', render: (_, r) => r.deposit.returned > 0 ? `¥${r.deposit.returned}` : '-' },
             { title: '净收入', dataIndex: 'net', width: 100, align: 'right', fixed: 'right',
               render: (v) => <b style={{ color: '#2f6b4f' }}>¥{v}</b> },
-          ]} />
+          ]}
+          expandable={{ expandedRowRender: (r) => r.settlementNote ? (
+            <div style={{ color: '#cf1322' }}>⚠ {r.settlementNote}
+              {r.partner ? `（合作方：${r.partner.name}，距离 ${r.partner.distanceKm}km，满意度 ${r.partner.satisfaction ?? '未回访'}）` : ''}
+            </div>
+          ) : r.oversellReason ? <div>超卖原因：{r.oversellReason}（渠道责任：{r.channelResponsibility}）</div> : null }}
+        />
       </Card>
     </div>
   );

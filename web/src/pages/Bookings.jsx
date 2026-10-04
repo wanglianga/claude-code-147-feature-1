@@ -4,7 +4,10 @@ import {
   Modal, Popconfirm, Select, Space, Table, Tabs, Tag, Timeline, message,
 } from 'antd';
 import dayjs from 'dayjs';
-import api, { BOOKING_STATUS, INCIDENT_TYPES, INCIDENT_STATUS, TASK_STATUS, DIRTINESS, REVIEW_CATEGORIES } from '../api';
+import api, {
+  BOOKING_STATUS, INCIDENT_TYPES, INCIDENT_STATUS, TASK_STATUS, DIRTINESS,
+  MEMBER_LEVELS, OVERSELL_ITEM_STATUS, OVERSELL_OPTIONS, REVIEW_CATEGORIES, SETTLE_METHODS,
+} from '../api';
 
 export default function Bookings() {
   const [list, setList] = useState([]);
@@ -37,6 +40,7 @@ export default function Bookings() {
       ...values,
       checkIn: values.range[0].format('YYYY-MM-DD'),
       checkOut: values.range[1].format('YYYY-MM-DD'),
+      estimatedArrival: values.estimatedArrival ? values.estimatedArrival.format('YYYY-MM-DDTHH:mm:ss') : undefined,
       range: undefined,
     });
     message.success('订单创建成功');
@@ -49,7 +53,13 @@ export default function Bookings() {
 
   const columns = [
     { title: '订单号', dataIndex: 'code', width: 100 },
-    { title: '客人', dataIndex: 'guestName', width: 110 },
+    { title: '客人', width: 150, render: (_, r) => (
+      <Space size={4}>
+        {r.guestName}
+        {r.memberLevel && r.memberLevel !== 'none' && <Tag color={MEMBER_LEVELS[r.memberLevel]?.color} style={{ marginInlineStart: 0 }}>{MEMBER_LEVELS[r.memberLevel]?.text}</Tag>}
+        {r.settlementBasis === 'partner_settled' && <Tag color="geekblue">转住</Tag>}
+      </Space>
+    ) },
     { title: '渠道', dataIndex: ['channel', 'name'], width: 90 },
     { title: '房间', width: 110, render: (_, r) => `${r.room.code} ${r.roomType.name}` },
     { title: '入住', dataIndex: 'checkIn', width: 105 },
@@ -94,7 +104,7 @@ export default function Bookings() {
       <Modal title="新建订单（统一房态/价格/规则校验）" open={createOpen} onCancel={() => setCreateOpen(false)}
         onOk={() => form.submit()} width={640} okText="创建">
         <Form form={form} layout="vertical" onFinish={create}
-          initialValues={{ adults: 2, children: 0, extraBeds: 0, pets: 0, breakfastCount: 2, range: [dayjs('2026-10-05'), dayjs('2026-10-06')] }}>
+          initialValues={{ adults: 2, children: 0, extraBeds: 0, pets: 0, breakfastCount: 2, memberLevel: 'none', range: [dayjs('2026-10-05'), dayjs('2026-10-06')] }}>
           <Space size={12} wrap>
             <Form.Item name="channelId" label="渠道" rules={[{ required: true }]} style={{ width: 150 }}>
               <Select options={channels.map((c) => ({ value: c.id, label: `${c.name}(佣金${(c.commissionRate * 100).toFixed(0)}%)` }))} />
@@ -120,6 +130,14 @@ export default function Bookings() {
             <Form.Item name="dietaryNotes" label="忌口" style={{ width: 220 }}><Input placeholder="如：不吃辣/素食/海鲜过敏" /></Form.Item>
             <Form.Item name="invoiceTitle" label="发票抬头（留空=不需要发票）" style={{ width: 260 }}><Input /></Form.Item>
             <Form.Item name="force" valuePropName="checked" label=" "><Checkbox>OTA强推/强制下单（允许突破可售）</Checkbox></Form.Item>
+          </Space>
+          <Space size={12} wrap>
+            <Form.Item name="memberLevel" label="会员等级" style={{ width: 130 }}>
+              <Select options={Object.entries(MEMBER_LEVELS).map(([v, m]) => ({ value: v, label: m.text }))} />
+            </Form.Item>
+            <Form.Item name="estimatedArrival" label="预计到店时间">
+              <DatePicker showTime={{ format: 'HH:mm' }} format="YYYY-MM-DD HH:mm" style={{ width: 200 }} />
+            </Form.Item>
           </Space>
         </Form>
       </Modal>
@@ -154,7 +172,21 @@ function BookingDetail({ detail, refresh }) {
               { key: '8', label: '发票', children: detail.invoiceRequired ? detail.invoiceTitle : '不需要' },
               { key: '9', label: '押金', children: `收¥${detail.depositAmount} 扣¥${detail.depositDeducted} 退¥${detail.depositReturned}` },
               { key: '10', label: '实际入离', children: `${detail.actualCheckIn ? dayjs(detail.actualCheckIn).format('MM-DD HH:mm') : '-'} ~ ${detail.actualCheckOut ? dayjs(detail.actualCheckOut).format('MM-DD HH:mm') : '-'}` },
+              { key: '11', label: '会员', children: <Tag color={MEMBER_LEVELS[detail.memberLevel]?.color}>{MEMBER_LEVELS[detail.memberLevel]?.text}{detail.memberPoints ? `/${detail.memberPoints} 积分` : ''}</Tag> },
+              { key: '12', label: '预计到店', children: detail.estimatedArrival ? dayjs(detail.estimatedArrival).format('MM-DD HH:mm') : '未报' },
+              { key: '13', label: '结算口径', children: detail.settlementBasis === 'partner_settled'
+                ? <Tag color="geekblue">合作民宿转住 · 按合作方价结算</Tag>
+                : <Tag>本店按原渠道结算</Tag> },
             ]} />
+            {detail.oversellReason && (
+              <div style={{ marginTop: 12 }}>
+                <Tag color="red">超卖换房</Tag>
+                <span style={{ color: '#cf1322' }}>原因：{detail.oversellReason}</span>
+                <div style={{ marginTop: 4, color: '#666' }}>
+                  渠道责任：<b>{detail.channelResponsibility}</b> ｜ 本单补偿成本：<b>¥{detail.oversellCompensationCost}</b>
+                </div>
+              </div>
+            )}
             <Space style={{ marginTop: 16 }}>
               {detail.status !== 'cancelled' && detail.status !== 'checked_out' && (
                 <Button onClick={() => setExtraOpen(true)}>临时加人</Button>
@@ -191,6 +223,33 @@ function BookingDetail({ detail, refresh }) {
             ),
           }))} />
         ) : '暂无事件',
+      },
+      {
+        key: 'oversell', label: `超卖换房${detail.oversellItems?.length ? `(${detail.oversellItems.length})` : ''}`,
+        children: detail.oversellItems?.length ? (
+          <Space direction="vertical" style={{ width: '100%' }}>
+            {detail.oversellItems.map((it) => (
+              <Descriptions key={it.id} column={1} size="small" bordered
+                title={<Space>
+                  <Tag color={OVERSELL_ITEM_STATUS[it.status]?.color}>{OVERSELL_ITEM_STATUS[it.status]?.text}</Tag>
+                  {it.option && <Tag color={OVERSELL_OPTIONS[it.option]?.color}>{OVERSELL_OPTIONS[it.option]?.text || '换房方案'}</Tag>}
+                  优先级评分 {it.priorityScore}（排名 #{it.rank}）
+                </Space>}
+                items={[
+                  { key: 'p', label: '方案', children: it.option === 'partner'
+                    ? `转住「${it.partner?.name}」，合作方价 ¥${it.partnerPrice}/晚，距离 ${it.partnerDistanceKm}km，${SETTLE_METHODS[it.partnerSettlementMethod]}，平台成本 ¥${it.platformCost}`
+                    : it.option === 'upgrade'
+                      ? `升级至 ${it.upgradeRoom?.code} 房，平台吸收差价/补偿 ¥${it.platformCost}`
+                      : it.option === 'refund'
+                        ? `退款补偿 ¥${it.compensationAmount}，平台成本 ¥${it.platformCost}`
+                        : '保留原房' },
+                  ...(it.settlementGuard ? [{ key: 'g', label: '结算防错', children: <span style={{ color: '#cf1322' }}>{it.settlementGuard}</span> }] : []),
+                  ...(it.guestSatisfaction !== null ? [{ key: 's', label: '转住满意度', children: `${it.guestSatisfaction} 分` }] : []),
+                  ...(it.guestResponse ? [{ key: 'r', label: '客人回应', children: it.guestResponse }] : []),
+                ]} />
+            ))}
+          </Space>
+        ) : '该订单不涉及超卖换房',
       },
       {
         key: 'cleaning', label: '保洁',

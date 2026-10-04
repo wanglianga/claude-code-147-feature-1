@@ -11,6 +11,7 @@ import { OpsModule } from './modules/ops';
 import { GuestModule } from './modules/guest';
 import { FinanceModule } from './modules/finance';
 import { AnalyticsModule } from './modules/analytics';
+import { OversellsModule } from './modules/oversells';
 import { SeedModule } from './seed';
 
 @Module({
@@ -27,7 +28,7 @@ import { SeedModule } from './seed';
       signOptions: { expiresIn: '12h' },
     }),
     AuthModule, CatalogModule, BookingsModule, OpsModule, GuestModule,
-    FinanceModule, AnalyticsModule, SeedModule,
+    FinanceModule, AnalyticsModule, OversellsModule, SeedModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

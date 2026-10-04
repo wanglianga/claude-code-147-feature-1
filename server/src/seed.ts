@@ -3,11 +3,12 @@ import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import {
-  ALL_ENTITIES, Booking, BreakfastPrep, Channel, CleaningTask, Compensation,
+  ALL_ENTITIES, Booking, BreakfastPrep, Channel, ChannelSyncPolicy, CleaningTask, Compensation,
   DailyInventory, DailyPrice, Incident, LinenDelivery, LinenItem, MaintenanceTicket,
-  Review, Room, RoomType, User,
+  OversellCase, OversellItem, PartnerInn, PartnerRoom, Review, Room, RoomType, User,
 } from './entities';
 import { eachDay, round2 } from './common/util';
+import { prioritizeOversellBookings } from './common/oversell';
 
 /**
  * 种子数据：2026 国庆旺季（10-01 ~ 10-08），今天为 10-03。
@@ -33,6 +34,11 @@ export class SeedService implements OnApplicationBootstrap {
     @InjectRepository(Incident) private incidents: Repository<Incident>,
     @InjectRepository(Review) private reviews: Repository<Review>,
     @InjectRepository(Compensation) private compensations: Repository<Compensation>,
+    @InjectRepository(PartnerInn) private partners: Repository<PartnerInn>,
+    @InjectRepository(PartnerRoom) private partnerRooms: Repository<PartnerRoom>,
+    @InjectRepository(OversellCase) private oversellCases: Repository<OversellCase>,
+    @InjectRepository(OversellItem) private oversellItems: Repository<OversellItem>,
+    @InjectRepository(ChannelSyncPolicy) private syncPolicies: Repository<ChannelSyncPolicy>,
     private dataSource: DataSource,
   ) {}
 
@@ -102,6 +108,7 @@ export class SeedService implements OnApplicationBootstrap {
       in: string; out: string; adults: number; children?: number; extraBeds?: number;
       pets?: number; breakfast?: number; dietary?: string; invoice?: string;
       status?: string; actualIn?: string; actualOut?: string; depositDeducted?: number;
+      memberLevel?: string; memberPoints?: number; estimatedArrival?: string; createdAt?: string;
     }) => {
       const room = roomByCode(p.room);
       const type = [t1, t2, t3, t4].find((t) => t.id === room.roomTypeId)!;
@@ -131,9 +138,12 @@ export class SeedService implements OnApplicationBootstrap {
         totalAmount: round2(roomFee + extraBedFee + breakfastFee + petFee),
         depositAmount: Number(type.depositAmount), depositDeducted,
         depositReturned: status === 'checked_out' ? round2(Number(type.depositAmount) - depositDeducted) : 0,
-        status,
+        status, memberLevel: p.memberLevel || 'none', memberPoints: p.memberPoints || 0,
+        estimatedArrival: p.estimatedArrival ? new Date(p.estimatedArrival) : null,
+        oversellCompensationCost: 0,
         actualCheckIn: p.actualIn ? new Date(p.actualIn) : null,
         actualCheckOut: p.actualOut ? new Date(p.actualOut) : null,
+        createdAt: p.createdAt ? new Date(p.createdAt) : undefined,
       }));
       for (const d of dates) {
         await this.inventory.increment({ roomTypeId: type.id, date: d }, 'booked', 1);
@@ -143,16 +153,16 @@ export class SeedService implements OnApplicationBootstrap {
 
     // ---- 已退房订单 ----
     const bk1 = await mkBooking({ room: '101', channel: web, guest: '张先生', in: '2026-10-01', out: '2026-10-03', adults: 2, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T15:00:00+08:00', actualOut: '2026-10-03T11:30:00+08:00' });
-    const bk2 = await mkBooking({ room: '201', channel: ota, guest: '刘女士', in: '2026-10-01', out: '2026-10-02', adults: 2, pets: 1, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T16:00:00+08:00', actualOut: '2026-10-02T14:30:00+08:00', depositDeducted: 300 });
+    const bk2 = await mkBooking({ room: '201', channel: ota, guest: '刘女士', in: '2026-10-01', out: '2026-10-02', adults: 2, pets: 1, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T16:00:00+08:00', actualOut: '2026-10-02T14:30:00+08:00', depositDeducted: 300, memberLevel: 'silver', memberPoints: 860, estimatedArrival: '2026-10-01T16:00:00+08:00', createdAt: '2026-09-20T21:10:00+08:00' });
     const bk3 = await mkBooking({ room: '301', channel: miniapp, guest: '王先生一家', in: '2026-10-01', out: '2026-10-03', adults: 2, children: 2, extraBeds: 1, breakfast: 4, dietary: '不吃辣', status: 'checked_out', actualIn: '2026-10-01T14:00:00+08:00', actualOut: '2026-10-03T12:10:00+08:00' });
     const bk4 = await mkBooking({ room: '401', channel: phone, guest: '周女士', in: '2026-10-01', out: '2026-10-02', adults: 4, breakfast: 4, status: 'checked_out', actualIn: '2026-10-01T15:30:00+08:00', actualOut: '2026-10-02T11:00:00+08:00' });
-    // 10-01 庭院双床房超卖：3 间房 4 张单
-    const bk17 = await mkBooking({ room: '203', channel: ota, guest: '黄先生', in: '2026-10-01', out: '2026-10-02', adults: 2, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T17:00:00+08:00', actualOut: '2026-10-02T10:30:00+08:00' });
-    const bk18 = await mkBooking({ room: '203', channel: phone, guest: '吴女士', in: '2026-10-01', out: '2026-10-02', adults: 2, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T18:30:00+08:00', actualOut: '2026-10-02T10:00:00+08:00' });
-    const bk19 = await mkBooking({ room: '202', channel: web, guest: '徐先生', in: '2026-10-01', out: '2026-10-02', adults: 2, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T15:00:00+08:00', actualOut: '2026-10-02T11:30:00+08:00' });
+    // 10-01 庭院双床房超卖：3 间房 4 张单（OTA 延迟同步，电话与 OTA 重复售出 203）
+    const bk17 = await mkBooking({ room: '203', channel: ota, guest: '黄先生', in: '2026-10-01', out: '2026-10-02', adults: 2, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T17:00:00+08:00', actualOut: '2026-10-02T10:30:00+08:00', memberLevel: 'silver', memberPoints: 520, estimatedArrival: '2026-10-01T17:00:00+08:00', createdAt: '2026-09-22T09:40:00+08:00' });
+    const bk18 = await mkBooking({ room: '203', channel: phone, guest: '吴女士', in: '2026-10-01', out: '2026-10-02', adults: 2, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T18:30:00+08:00', actualOut: '2026-10-02T10:00:00+08:00', memberLevel: 'gold', memberPoints: 3120, estimatedArrival: '2026-10-01T18:30:00+08:00', createdAt: '2026-09-30T23:10:00+08:00' });
+    const bk19 = await mkBooking({ room: '202', channel: web, guest: '徐先生', in: '2026-10-01', out: '2026-10-02', adults: 2, breakfast: 2, status: 'checked_out', actualIn: '2026-10-01T15:00:00+08:00', actualOut: '2026-10-02T11:30:00+08:00', memberLevel: 'none', estimatedArrival: '2026-10-01T15:00:00+08:00', createdAt: '2026-09-26T11:00:00+08:00' });
 
     // ---- 在住订单 ----
-    const bk5 = await mkBooking({ room: '102', channel: web, guest: '李女士', in: '2026-10-02', out: '2026-10-05', adults: 2, breakfast: 2, invoice: '杭州云溪科技有限公司', status: 'checked_in', actualIn: '2026-10-02T15:00:00+08:00' });
+    const bk5 = await mkBooking({ room: '102', channel: web, guest: '李女士', in: '2026-10-02', out: '2026-10-05', adults: 2, breakfast: 2, invoice: '杭州云溪科技有限公司', status: 'checked_in', actualIn: '2026-10-02T15:00:00+08:00', memberLevel: 'gold', memberPoints: 2680, estimatedArrival: '2026-10-02T15:00:00+08:00', createdAt: '2026-09-18T10:20:00+08:00' });
     const bk6 = await mkBooking({ room: '202', channel: ota, guest: '赵先生', in: '2026-10-02', out: '2026-10-04', adults: 3, children: 1, breakfast: 4, dietary: '海鲜过敏', status: 'checked_in', actualIn: '2026-10-02T16:00:00+08:00' });
     const bk7 = await mkBooking({ room: '302', channel: miniapp, guest: '孙女士一家', in: '2026-10-03', out: '2026-10-06', adults: 2, children: 2, extraBeds: 1, breakfast: 4, dietary: '素食', status: 'checked_in', actualIn: '2026-10-03T14:30:00+08:00' });
     const bk8 = await mkBooking({ room: '402', channel: ota, guest: '钱先生', in: '2026-10-03', out: '2026-10-05', adults: 3, breakfast: 3, status: 'checked_in', actualIn: '2026-10-03T15:00:00+08:00' });
@@ -160,13 +170,13 @@ export class SeedService implements OnApplicationBootstrap {
     const bk16 = await mkBooking({ room: '303', channel: ota, guest: '冯女士', in: '2026-10-02', out: '2026-10-04', adults: 2, children: 1, breakfast: 3, status: 'checked_in', actualIn: '2026-10-02T15:00:00+08:00' });
 
     // ---- 未来订单 ----
-    const bk9 = await mkBooking({ room: '103', channel: web, guest: '许先生', in: '2026-10-04', out: '2026-10-06', adults: 2, breakfast: 2 });
+    const bk9 = await mkBooking({ room: '103', channel: web, guest: '许先生', in: '2026-10-04', out: '2026-10-06', adults: 2, breakfast: 2, memberLevel: 'platinum', memberPoints: 5240, estimatedArrival: '2026-10-04T13:30:00+08:00', createdAt: '2026-09-15T08:30:00+08:00' });
     const bk10 = await mkBooking({ room: '203', channel: ota, guest: '何女士', in: '2026-10-04', out: '2026-10-07', adults: 2, pets: 1, breakfast: 2 });
     const bk11 = await mkBooking({ room: '301', channel: miniapp, guest: '吕先生一家', in: '2026-10-04', out: '2026-10-06', adults: 2, children: 1, breakfast: 3 });
     const bk12 = await mkBooking({ room: '403', channel: phone, guest: '孔女士', in: '2026-10-05', out: '2026-10-07', adults: 4, breakfast: 4, invoice: '上海远山设计工作室' });
     // 10-04 山景大床房超卖：102 住到 10-05、103 已订、101 被 OTA 连下两单
-    const bk13 = await mkBooking({ room: '101', channel: ota, guest: '曹先生', in: '2026-10-04', out: '2026-10-05', adults: 2, breakfast: 2 });
-    const bk14 = await mkBooking({ room: '101', channel: ota, guest: '谢女士', in: '2026-10-04', out: '2026-10-05', adults: 2, breakfast: 2 });
+    const bk13 = await mkBooking({ room: '101', channel: ota, guest: '曹先生', in: '2026-10-04', out: '2026-10-05', adults: 2, breakfast: 2, memberLevel: 'gold', memberPoints: 2450, estimatedArrival: '2026-10-04T14:00:00+08:00', createdAt: '2026-09-24T20:05:00+08:00' });
+    const bk14 = await mkBooking({ room: '101', channel: ota, guest: '谢女士', in: '2026-10-04', out: '2026-10-05', adults: 2, breakfast: 2, memberLevel: 'silver', memberPoints: 760, estimatedArrival: '2026-10-04T20:30:00+08:00', createdAt: '2026-09-30T22:40:00+08:00' });
 
     // ---- 事件链 ----
     await this.incidents.save([
@@ -176,7 +186,7 @@ export class SeedService implements OnApplicationBootstrap {
       { type: 'linen_delay', bookingId: null, roomId: null, description: '布草「床单」20 件延迟送达（应 10-02 09:00 前到，实际 16:20 到），当日保洁换布紧张', status: 'resolved', cost: 0, occurredAt: new Date('2026-10-02T16:20:00+08:00'), resolvedAt: new Date('2026-10-02T17:00:00+08:00'), resolution: '启用备用布草，洗涤厂承诺旺季每日两送' },
       { type: 'extra_guests', bookingId: bk6.id, roomId: bk6.roomId, description: `订单 ${bk6.code} 临时加人：成人 2→3，早餐 3→4 份/天，早餐费重算`, status: 'resolved', cost: 0, occurredAt: new Date('2026-10-02T20:00:00+08:00'), resolvedAt: new Date('2026-10-02T20:05:00+08:00'), resolution: '费用已重算' },
       { type: 'breakfast_shortage', bookingId: null, roomId: null, description: '2026-10-03 早餐供应不足：需求 15 份，实际备餐 12 份，缺口 3 份', status: 'resolved', cost: 50, occurredAt: new Date('2026-10-03T08:40:00+08:00'), resolvedAt: new Date('2026-10-03T09:30:00+08:00'), resolution: '向受影响客人补偿并加急补做' },
-      { type: 'oversell', bookingId: bk18.id, roomId: bk18.roomId, description: `10-01「庭院双床房」超售：电话与 OTA 同时订出 203，物理房量不足，吴女士到店无房等待 2 小时`, status: 'resolved', cost: 200, occurredAt: new Date('2026-10-01T18:30:00+08:00'), resolvedAt: new Date('2026-10-01T20:40:00+08:00'), resolution: '协调同房型升级并免单 ¥200' },
+      { type: 'oversell', bookingId: bk18.id, roomId: bk18.roomId, description: `10-01「庭院双床房」超售：OTA 房态延迟同步，电话与 OTA 同时订出 203，吴女士到店无房等待 2 小时`, status: 'resolved', cost: 520, occurredAt: new Date('2026-10-01T18:30:00+08:00'), resolvedAt: new Date('2026-10-01T20:40:00+08:00'), resolution: '协调同村合作民宿「竹溪民宿」转住，按合作方价 ¥520 月结，客人回访满意度 3 分' },
       { type: 'oversell', bookingId: bk14.id, roomId: bk14.roomId, description: `10-04「山景大床房」超售：OTA 连续下单致 101 重复售出（已订 4/物理 3），需提前协调`, status: 'open', cost: 0, occurredAt: new Date('2026-10-03T09:20:00+08:00') },
     ] as any);
 
@@ -237,6 +247,101 @@ export class SeedService implements OnApplicationBootstrap {
       { reviewId: rv1.id, bookingId: bk3.id, type: 'voucher', amount: 100, voucherCode: 'VC7K2Q9P', status: 'issued', reason: '空调故障差评补偿', createdAt: new Date('2026-10-03T14:00:00+08:00') },
       { reviewId: rv2.id, bookingId: bk16.id, type: 'cash', amount: 50, voucherCode: null, status: 'issued', reason: '早餐不足差评补偿', createdAt: new Date('2026-10-03T11:00:00+08:00') },
     ] as any);
+
+    // ---- 同村合作民宿（超卖转住接收方） ----
+    const [pZhuxi, pChawu, pYuanshan] = await this.partners.save([
+      { code: 'ZX', name: '竹溪民宿', village: '云溪村（同村）', distanceKm: 0.8, contactName: '周老板', contactPhone: '139****8201', settlementMethod: 'monthly', active: true, note: '同为景观房，步行 10 分钟，旺季有互助协议' },
+      { code: 'CW', name: '茶坞小筑', village: '茶坞村（邻村）', distanceKm: 2.3, contactName: '林姐', contactPhone: '137****5566', settlementMethod: 'per_night', active: true, note: '逐晚现结，需车接车送' },
+      { code: 'YS', name: '远山雅居', village: '枫林村（邻村）', distanceKm: 4.5, contactName: '吴经理', contactPhone: '135****7788', settlementMethod: 'prepaid', active: true, note: '平台预付锁房，档次偏高' },
+    ] as any);
+
+    const prRows: Partial<PartnerRoom>[] = [];
+    // 10-01 历史转住：竹溪 观景大床 1 间已被吴女士占用
+    prRows.push({ partnerId: pZhuxi.id, date: '2026-10-01', roomName: '观景大床房', available: 1, partnerPrice: 520, sold: 1 });
+    // 10-04 起的可转住房源（供 10-04 开放案件选择）
+    for (const d of ['2026-10-04', '2026-10-05']) {
+      prRows.push({ partnerId: pZhuxi.id, date: d, roomName: '观景大床房', available: 1, partnerPrice: 620, sold: 0 });
+      prRows.push({ partnerId: pChawu.id, date: d, roomName: '山景双床房', available: 2, partnerPrice: 560, sold: 0 });
+      prRows.push({ partnerId: pYuanshan.id, date: d, roomName: 'Loft观景大床', available: 1, partnerPrice: 880, sold: 0 });
+    }
+    await this.partnerRooms.save(prRows as any);
+    const zhuxi1001 = await this.partnerRooms.findOne({ where: { partnerId: pZhuxi.id, date: '2026-10-01', roomName: '观景大床房' } });
+
+    // ---- 渠道房态同步策略（复盘调整前） ----
+    await this.syncPolicies.save([
+      { channelId: web.id, syncIntervalMin: 15, safetyBuffer: 0, mode: 'auto', note: '官网直连，房态实时' },
+      { channelId: miniapp.id, syncIntervalMin: 10, safetyBuffer: 0, mode: 'auto', note: '' },
+      { channelId: ota.id, syncIntervalMin: 5, safetyBuffer: 0, mode: 'auto', note: '10-01 已发生一次延迟同步超卖，待复盘调整' },
+      { channelId: phone.id, syncIntervalMin: 15, safetyBuffer: 0, mode: 'manual', note: '电话单人工录入房态' },
+    ] as any);
+
+    // ---- 超卖换房案件 ----
+    const incOversellHist = await this.incidents.findOne({
+      where: { type: 'oversell', bookingId: bk18.id }, order: { occurredAt: 'DESC' },
+    });
+    const incOversellOpen = await this.incidents.findOne({
+      where: { type: 'oversell', bookingId: bk14.id }, order: { occurredAt: 'DESC' },
+    });
+
+    const buildItems = async (
+      caseId: number, list: Booking[], cap: number, conflictDate: string,
+      override?: Record<number, Partial<any>>,
+    ) => {
+      const ranked = prioritizeOversellBookings(list, conflictDate);
+      for (const r of ranked) {
+        const retain = r.rank <= cap;
+        await this.oversellItems.save(this.oversellItems.create({
+          caseId, bookingId: r.booking.id, priorityScore: r.score, rank: r.rank,
+          scoreDetail: JSON.stringify(r.detail),
+          option: retain ? 'keep' : '',
+          status: retain ? 'kept' : 'pending',
+          decidedAt: retain ? new Date() : null,
+          upgradePrice: 0, upgradeSurcharge: 0, partnerPrice: 0,
+          compensationAmount: 0, platformCost: 0,
+          ...(override?.[r.booking.id] || {}),
+        } as any));
+      }
+    };
+
+    // 案件一（历史，已解决）：10-01 庭院双床房，OTA 延迟同步 → 吴女士转住竹溪民宿
+    const caseHist = await this.oversellCases.save(this.oversellCases.create({
+      code: 'OS26100101', roomTypeId: t2.id, channelId: ota.id, date: '2026-10-01',
+      channelResponsibility: 'ota_delayed_sync',
+      reason: 'OTA 房态延迟同步约 35 分钟，电话与 OTA 同时售出 203 房',
+      status: 'resolved', detectedAt: new Date('2026-10-01T18:35:00+08:00'),
+      resolvedAt: new Date('2026-10-01T20:40:00+08:00'),
+      totalCompensationCost: 520, incidentId: incOversellHist?.id || null,
+      syncNote: 'OTA 推送间隔维持 5 分钟偏慢；下一轮收紧间隔并预留缓冲房',
+    }));
+    await buildItems(caseHist.id, [bk2, bk17, bk18, bk19], 3, '2026-10-01', {
+      [bk18.id]: {
+        option: 'partner', status: 'accepted', decidedAt: new Date('2026-10-01T20:40:00+08:00'),
+        guestResponse: '客人接受转住竹溪民宿（等待约 2 小时）',
+        partnerId: pZhuxi.id, partnerRoomId: zhuxi1001.id, partnerDate: '2026-10-01',
+        partnerPrice: 520, partnerDistanceKm: 0.8, partnerSettlementMethod: 'monthly',
+        guestSatisfaction: 3,
+        settlementGuard: '转住「竹溪民宿」按合作方价 ¥520/晚×1（月结）结算，渠道不得再按原房型结算',
+        compensationAmount: 0, compensationType: '', platformCost: 520,
+      },
+    });
+    Object.assign(bk18, {
+      settlementBasis: 'partner_settled', oversellCaseId: caseHist.id,
+      oversellReason: caseHist.reason, channelResponsibility: 'ota_delayed_sync',
+      oversellCompensationCost: 520, actualCheckIn: null, actualCheckOut: null,
+    });
+    await this.bookings.save(bk18);
+
+    // 案件二（开放，待处理）：10-04 山景大床房，OTA 连续下单致 101 重复售出
+    // 评分：许先生(白金/早订/早到) > 李女士(金卡/3晚高价值) > 曹先生(金卡) > 谢女士(银卡/最晚订/最晚到)
+    // 建议：前 3 位保留原房，谢女士进入换房补偿流程
+    const caseOpen = await this.oversellCases.save(this.oversellCases.create({
+      code: 'OS26100401', roomTypeId: t1.id, channelId: ota.id, date: '2026-10-04',
+      channelResponsibility: 'ota_delayed_sync',
+      reason: 'OTA 房态延迟同步约 28 分钟，101 房在 22:40 被二次售出（10-04 山景大床房在订 4/物理 3）',
+      status: 'open', detectedAt: new Date('2026-10-03T09:20:00+08:00'),
+      totalCompensationCost: 0, incidentId: incOversellOpen?.id || null,
+    }));
+    await buildItems(caseOpen.id, [bk5, bk9, bk13, bk14], 3, '2026-10-04');
   }
 }
 

@@ -115,8 +115,16 @@ print('== 7. 结算 ==')
 st = call('GET', '/settlements?from=2026-10-01&to=2026-10-08', T)
 check('结算列表非空', len(st['list']) >= 15)
 check('合计=各行求和', abs(st['totals']['net'] - sum(x['net'] for x in st['list'])) < 0.05)
-ota_rows = [x for x in st['list'] if x['channelCode'] == 'ota']
-check('OTA佣金=房费15%', all(abs(x['commission'] - x['lines'][0]['amount'] * 0.15) < 0.05 for x in ota_rows))
+ota_rows = [x for x in st['list'] if x['channelCode'] == 'ota' and not x.get('channelSettlementBlocked')]
+check('OTA佣金=房费15%（转住单除外）', all(abs(x['commission'] - [l['amount'] for l in x['lines'] if l['label'].startswith('房费')][0] * 0.15) < 0.05 for x in ota_rows))
+# 历史转住单（吴女士，10-01 庭院双床房）按合作方价结算：渠道佣金为 0 且带防错提示
+bk18_settle = [x for x in st['list'] if x['guestName'] == '吴女士']
+check('历史转住单存在', len(bk18_settle) == 1)
+if bk18_settle:
+    bs = bk18_settle[0]
+    check('转住单渠道不再按原房型结算(佣金0+防错标记)', bs['commission'] == 0 and bs['channelSettlementBlocked'] is True, bs.get('settlementNote', ''))
+    check('转住单含合作方代付行', any('代付' in l['label'] and abs(abs(l['amount']) - 520) < 0.01 for l in bs['lines']))
+    check('转住单记录合作方距离/满意度/结算方式', bool(bs['partner']) and bs['partner']['distanceKm'] == 0.8 and bs['partner']['satisfaction'] == 3 and bs['partner']['method'] == 'monthly')
 
 print('== 8. 复盘与调价 ==')
 dash = call('GET', '/analytics/dashboard?from=2026-09-28&to=2026-10-08', T)
@@ -135,6 +143,127 @@ check('调价应用成功', applied.get('ok') is True)
 inv2 = call('GET', '/inventory?from=2026-12-31&to=2027-01-02', T)
 t1row = [r for r in inv2 if r['typeName'] == '山景大床房'][0]
 check('新周期可售=调整值', t1row['days'][0]['sellable'] == t1['adjustedSellable'])
+
+print('== 9. 超卖换房补偿 ==')
+cases = call('GET', '/oversells/cases', T)
+check('种子含两起超卖案件', len(cases) == 2, str([(c['code'], c['status']) for c in cases]))
+open_case = [c for c in cases if c['code'] == 'OS26100401'][0]
+hist_case = [c for c in cases if c['code'] == 'OS26100101'][0]
+check('历史案件已解决且成本¥520', hist_case['status'] == 'resolved' and float(hist_case['totalCompensationCost']) == 520)
+check('开放案件责任为OTA延迟同步', open_case['channelResponsibility'] == 'ota_delayed_sync')
+oc = call('GET', f"/oversells/cases/{open_case['id']}", T)
+check('案件含4位冲突客人(3保留+1待方案)', len(oc['items']) == 4
+      and len([i for i in oc['items'] if i['status'] == 'kept']) == 3
+      and len([i for i in oc['items'] if i['status'] == 'pending']) == 1)
+displaced = [i for i in oc['items'] if i['status'] == 'pending'][0]
+check('评分末位为谢女士(银卡/最晚订)', displaced['booking']['guestName'] == '谢女士' and displaced['rank'] == 4)
+retained = [i for i in oc['items'] if i['status'] == 'kept']
+check('白金客人许先生排名第1保留原房', retained[0]['booking']['guestName'] == '许先生' and retained[0]['rank'] == 1)
+check('评分含四因子(下单/到店/价值/会员)', {d['label'] for d in displaced['scoreDetails']} == {'下单时间', '到店时间', '订单价值', '会员等级'})
+dup = call('POST', '/oversells/detect', T, {'roomTypeId': oc['roomType']['id'], 'date': '2026-10-04', 'delayMin': 28})
+check('重复检测幂等不重建案件', dup.get('id') == open_case['id'])
+notover = call('POST', '/oversells/detect', T, {'roomTypeId': oc['roomType']['id'], 'date': '2026-10-10', 'delayMin': 10})
+check('未超卖日期拒绝建案', notover.get('statusCode') == 400)
+prooms = call('GET', '/partners/rooms?date=2026-10-04', T)
+zx = [p for p in prooms if p['partner']['name'] == '竹溪民宿' and p['roomName'] == '观景大床房'][0]
+check('合作方房源报价¥620且有余量', float(zx['partnerPrice']) == 620 and zx['remaining'] == 1)
+inv_before = call('GET', '/inventory?from=2026-10-04&to=2026-10-04', T)
+t1_before = [r for r in inv_before if r['typeName'] == '山景大床房'][0]['days'][0]
+call('POST', f"/oversells/items/{displaced['id']}/propose", T,
+     {'option': 'partner', 'partnerRoomId': zx['id'], 'compensationAmount': 0})
+dec = call('POST', f"/oversells/items/{displaced['id']}/decide", T, {'accepted': True, 'response': '愿意转住竹溪民宿'})
+acc_item = [i for i in dec['items'] if i['id'] == displaced['id']][0]
+check('客人接受转住', acc_item['status'] == 'accepted' and acc_item['option'] == 'partner')
+check('转住成本=合作方价×晚数¥620', float(acc_item['platformCost']) == 620 and float(acc_item['partnerPrice']) == 620)
+check('结算防错提示已生成', '渠道不得再按原房型结算' in acc_item['settlementGuard'])
+bk14 = call('GET', f"/bookings/{displaced['bookingId']}", T)
+check('原订单保留超卖原因/渠道责任/补偿成本', bool(bk14['oversellReason']) and bk14['channelResponsibility'] == 'ota_delayed_sync' and float(bk14['oversellCompensationCost']) == 620)
+check('原订单改为合作方价结算口径', bk14['settlementBasis'] == 'partner_settled')
+inv_after = call('GET', '/inventory?from=2026-10-04&to=2026-10-04', T)
+t1_after = [r for r in inv_after if r['typeName'] == '山景大床房'][0]['days'][0]
+check('转住后原房型释放1间', t1_after['booked'] == t1_before['booked'] - 1, f"{t1_before['booked']}->{t1_after['booked']}")
+prooms2 = call('GET', '/partners/rooms?date=2026-10-04', T)
+zx2 = [p for p in prooms2 if p['id'] == zx['id']][0]
+check('合作房量被占用(余量0)', zx2['remaining'] == 0 and zx2['sold'] == 1)
+sat = call('POST', f"/oversells/items/{displaced['id']}/satisfaction", T, {'rating': 4, 'note': '民宿干净，接送及时'})
+check('满意度已登记', any(float(i['guestSatisfaction']) == 4 for i in sat['items'] if i['id'] == displaced['id']))
+oc2 = call('GET', f"/oversells/cases/{open_case['id']}", T)
+check('全部处理完案件关闭', oc2['status'] == 'resolved' and float(oc2['totalCompensationCost']) == 620)
+deny = call('POST', f"/bookings/{displaced['bookingId']}/check-in", T)
+check('转住单拒绝本店入住', deny.get('statusCode') == 400)
+
+# 场景二：升级房（10-07 山景大床房，4 单）
+t1_id = [t for t in call('GET', '/room-types', T) if t['name'] == '山景大床房'][0]['id']
+rooms_all = call('GET', '/rooms', T)
+r101, r102, r103 = [[r for r in rooms_all if r['code'] == c][0]['id'] for c in ('101', '102', '103')]
+for idx, rid in enumerate([r101, r102, r103, r101]):
+    call('POST', '/bookings', T, {'roomId': rid, 'channelId': ota['id'], 'guestName': f'测试升{idx}',
+         'checkIn': '2026-10-07', 'checkOut': '2026-10-08', 'adults': 2, 'force': idx == 3,
+         'memberLevel': 'gold', 'estimatedArrival': '2026-10-07T15:00:00+08:00'})
+cu = call('POST', '/oversells/detect', T, {'roomTypeId': t1_id, 'date': '2026-10-07', 'delayMin': 15})
+check('升级场景建案成功', cu.get('id') is not None and cu['status'] == 'open', str(cu)[:120])
+disp_u = [i for i in cu['items'] if i['status'] == 'pending'][0]
+check('存在更高价位升级空房', len(disp_u['upgradeOptions']) >= 1, str([o['roomCode'] for o in disp_u['upgradeOptions']]))
+up = disp_u['upgradeOptions'][0]
+pu = call('POST', f"/oversells/items/{disp_u['id']}/propose", T,
+          {'option': 'upgrade', 'upgradeRoomId': up['roomId'], 'compensationAmount': 0, 'surcharge': 0})
+iu = [i for i in pu['items'] if i['id'] == disp_u['id']][0]
+check('升级平台吸收差价>0', abs(float(iu['platformCost']) - (float(iu['upgradePrice']) - float(iu['booking']['roomFee']))) < 0.01)
+du = call('POST', f"/oversells/items/{disp_u['id']}/decide", T, {'accepted': True})
+iu2 = [i for i in du['items'] if i['id'] == disp_u['id']][0]
+check('升级接受后订单换到新房', iu2['status'] == 'accepted')
+bu = call('GET', f"/bookings/{disp_u['bookingId']}", T)
+check('订单房间已升级且保留超卖标记', bu['roomId'] == up['roomId'] and bool(bu['oversellReason']))
+
+# 场景三：退款补偿（10-08 庭院双床房，4 单）
+t2_id = [t for t in call('GET', '/room-types', T) if t['name'] == '庭院双床房'][0]['id']
+r201, r202, r203 = [[r for r in rooms_all if r['code'] == c][0]['id'] for c in ('201', '202', '203')]
+for idx, rid in enumerate([r201, r202, r203, r203]):
+    call('POST', '/bookings', T, {'roomId': rid, 'channelId': ota['id'], 'guestName': f'测试退{idx}',
+         'checkIn': '2026-10-08', 'checkOut': '2026-10-09', 'adults': 2, 'breakfastCount': 2, 'force': idx == 3})
+cr = call('POST', '/oversells/detect', T, {'roomTypeId': t2_id, 'date': '2026-10-08', 'delayMin': 12})
+disp_r = [i for i in cr['items'] if i['status'] == 'pending'][0]
+bad_prop = call('POST', f"/oversells/items/{disp_r['id']}/propose", T, {'option': 'refund', 'compensationAmount': 0})
+check('退款金额为0被拒', bad_prop.get('statusCode') == 400)
+call('POST', f"/oversells/items/{disp_r['id']}/propose", T, {'option': 'refund', 'compensationType': 'refund', 'compensationAmount': 300})
+dr = call('POST', f"/oversells/items/{disp_r['id']}/decide", T, {'accepted': True, 'response': '接受退款自行解决'})
+ir = [i for i in dr['items'] if i['id'] == disp_r['id']][0]
+check('退款方案接受且案件关闭', ir['status'] == 'accepted' and dr['status'] == 'resolved')
+br = call('GET', f"/bookings/{disp_r['bookingId']}", T)
+check('退款订单已取消并保留超卖原因', br['status'] == 'cancelled' and bool(br['oversellReason']) and br['channelResponsibility'] == 'ota_delayed_sync')
+comps_r = call('GET', '/compensations', T)
+check('退款补偿已落补偿账', any(c['bookingId'] == disp_r['bookingId'] and abs(float(c['amount']) - 300) < 0.01 and c['type'] == 'refund' for c in comps_r))
+
+# 场景四：客人拒绝后可重新出方案（10-09 山景大床房）
+for idx, rid in enumerate([r101, r102, r103, r102]):
+    call('POST', '/bookings', T, {'roomId': rid, 'channelId': ota['id'], 'guestName': f'测试拒{idx}',
+         'checkIn': '2026-10-09', 'checkOut': '2026-10-10', 'adults': 2, 'force': idx == 3})
+cj = call('POST', '/oversells/detect', T, {'roomTypeId': t1_id, 'date': '2026-10-09', 'delayMin': 9})
+disp_j = [i for i in cj['items'] if i['status'] == 'pending'][0]
+call('POST', f"/oversells/items/{disp_j['id']}/propose", T, {'option': 'refund', 'compensationAmount': 100})
+dj = call('POST', f"/oversells/items/{disp_j['id']}/decide", T, {'accepted': False, 'response': '退款太少'})
+ij = [i for i in dj['items'] if i['id'] == disp_j['id']][0]
+check('客人拒绝被记录且可再提案', ij['status'] == 'declined')
+pj2 = call('POST', f"/oversells/items/{disp_j['id']}/propose", T, {'option': 'refund', 'compensationAmount': 400})
+check('拒绝后可重新出方案', any(i['id'] == disp_j['id'] and i['status'] == 'proposed' for i in pj2['items']))
+
+# 渠道同步策略：复盘收紧
+pols = call('GET', '/oversells/sync-policies', T)
+ota_pol = [p for p in pols if p['channelCode'] == 'ota'][0]
+upd = call('POST', f"/oversells/sync-policies/{ota_pol['channelId']}", T,
+           {'syncIntervalMin': 3, 'safetyBuffer': 1, 'mode': 'manual', 'note': '两次延迟同步，改人工确认放房'})
+check('同步策略已收紧(3分钟/缓冲1/人工)', upd['syncIntervalMin'] == 3 and upd['safetyBuffer'] == 1 and upd['mode'] == 'manual')
+
+# 超卖复盘
+review = call('GET', '/analytics/oversell-review', T)
+check('复盘统计5起案件(2种子+3新场景)', review['totals']['cases'] == 5, str(review['totals']))
+check('复盘转住2/升级1/退款1', (review['totals']['partner'], review['totals']['upgrade'], review['totals']['refund']) == (2, 1, 1), str(review['totals']))
+ota_sum = [c for c in review['byChannel'] if c['channelCode'] == 'ota'][0]
+check('复盘含OTA渠道责任与策略建议', ota_sum['cases'] == 5 and '收紧' in ota_sum['suggestion']['text'])
+hist_review = [c for c in review['cases'] if c['code'] == 'OS26100101'][0]
+check('复盘保留合作方价格/距离/满意度/结算方式',
+      hist_review['partnerTransfers'][0]['pricePerNight'] == 520 and hist_review['partnerTransfers'][0]['distanceKm'] == 0.8
+      and hist_review['partnerTransfers'][0]['satisfaction'] == 3 and hist_review['partnerTransfers'][0]['method'] == 'monthly')
 
 print(f'\n结果: {ok} 通过, {fail} 失败')
 sys.exit(1 if fail else 0)
